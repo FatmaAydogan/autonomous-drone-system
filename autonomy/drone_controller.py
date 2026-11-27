@@ -536,12 +536,13 @@ class DroneController:
 
         return True
 
-
-
-    def wait_until_landed(self, timeout=60):
+    def wait_until_landed(self, timeout: float = 60.0) -> bool:
 
         if self.connection is None:
             raise RuntimeError("Drone is not connected.")
+
+        if not 0 < timeout < float("inf"):
+            raise ValueError("Timeout must be a finite positive number.")
 
         print("Waiting for drone to land...")
 
@@ -558,18 +559,21 @@ class DroneController:
 
         #calculates the end of the waiting
         deadline = time.monotonic() + timeout
+        freshness_limit = 3.0
 
-        on_ground = False
-        armed = True
+        ground_time: float | None = None
+        disarmed_time: float | None = None
 
         while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+
             message = self.connection.recv_match(
 
                 #EXTENDED_SYS_STATE -> AIR,LAND,GRAOUND,
                 #HEARBEAT ->ARM, DISARM
                 type=["EXTENDED_SYS_STATE", "HEARTBEAT"],
                 blocking=True,
-                timeout=1
+                timeout=min(1.0, max(0.0, remaining))
             )
 
             if message is None:
@@ -581,11 +585,15 @@ class DroneController:
             if message.get_srcComponent() != self.connection.target_component:
                 continue
 
+            now = time.monotonic()
 
             if message.get_type() == "EXTENDED_SYS_STATE":
-                on_ground = (
-                    message.landed_state == mavutil.mavlink.MAV_LANDED_STATE_ON_GROUND
-                )
+                if message.landed_state == (
+                    mavutil.mavlink.MAV_LANDED_STATE_ON_GROUND
+                ):
+                    ground_time = now
+                else:
+                    ground_time = None
 
             elif message.get_type() == "HEARTBEAT":
                 armed = bool(
@@ -593,19 +601,29 @@ class DroneController:
                     & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
                 )
 
-            
+                if not armed:
+                    disarmed_time = now
+                else:
+                    disarmed_time = None
 
-            if on_ground and not armed:
+            ground_recent = (
+                ground_time is not None
+                and now - ground_time <= freshness_limit
+            )
+
+            disarmed_recent = (
+                disarmed_time is not None
+                and now - disarmed_time <= freshness_limit
+            )
+
+            if ground_recent and disarmed_recent:
                 print("Landing confirmed!")
-                print("Drone is on the ground and disarmed")
-
+                print("Drone is ON_GROUND and DISARMED.")
                 return True
 
-            
         raise TimeoutError(
-            "Landing could not be confirmed."
+            "Landing could not be confirmed with fresh telemetry."
         )
-
 
 
 def main():
